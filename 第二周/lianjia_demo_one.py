@@ -1,13 +1,37 @@
 import requests
 from requests.exceptions import RequestException
-from urllib import parse
 from bs4 import BeautifulSoup
 import time
 import random
 import pandas
 import functools
+import logging
 
 bad_urls = []
+
+
+def get_proxy():
+    """
+        因为免费的爬取下来，验证时基本都是不可以用的代理
+        因此在这里使用阿布云的代理
+        但是7-12过期了，可以自行注册替换
+    """
+    # 代理服务器
+    proxy_host = "http-pro.abuyun.com"
+    proxy_port = "9010"
+
+    # 代理隧道验证信息
+    proxy_user = "H2O68H0VI19F6G5P"
+    proxy_pass = "5364885539DF4294"
+
+    proxy_meta = "http://%(user)s:%(pass)s@%(host)s:%(port)s" % {
+        "host": proxy_host,
+        "port": proxy_port,
+        "user": proxy_user,
+        "pass": proxy_pass,
+    }
+
+    return {"http": proxy_meta, "https": proxy_meta, }
 
 
 def get_urls(pages, kw="zh"):
@@ -17,138 +41,99 @@ def get_urls(pages, kw="zh"):
     :return: 返回url list
     """
     url = "https://{city}.lianjia.com/zufang/pg{pg_num}/#contentList"
-    urls = [url.format(pg_num=page, city=parse.quote(kw, 'utf-8')) for page in range(1, pages + 1)]
+    urls = [url.format(pg_num=page, city=kw) for page in range(1, pages + 1)]
     return urls
 
 
-def get_html(url):
+def get_html(url, proxy=None):
     """
+    :param proxy: 代理，默认不使用
     :param url: 爬取的url
     :return: 返回响应内容
     """
-    time.sleep(random.randint(0, 15))
+    # 10s内随机sleep
+    time.sleep(random.randint(0, 11))
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.110 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.353"
+                      "8.110 Safari/537.36"
     }
     try:
-        r = requests.get(url, headers=headers)
+        if proxy:
+            print(f"get_html的proxy:{proxy}")
+        r = requests.get(url, headers=headers, proxies=proxy)
         if r.status_code == 200:
+            print(f"请求链接：{url} ......ok")
             return r.text
     except RequestException as e:
-        print(f"{url} is bad,code:{r.status_code},error:{e}")
+        logging.warning(f"{url} is bad,code:{r.status_code},error:{e}")
         bad_urls.append(url)
 
 
-def supplement_list(l, l_len):
+def analytic_room_html(html):
     """
-    因为内容长度不一，需要补长统一
-    :param l: 要补长的list
-    :param l_len: 目标长度
-    :return: 返回补长后的list
-    """
-    new_l = list(l)
-    while len(new_l) < l_len:
-        new_l.insert(0, "None")
-    return new_l
-
-
-def analytic_html(html):
-    """
-    title_list:标题列表
-    price_list:价格列表
-    addr_list:地址列表
-    area_list:面值列表
-    direction_list:朝向列表
-    shape_list:房型列表
     解析响应内容
     :param html:要解析的html
-    :return: 返回解析后的内容
+    :return: content_list 返回包含解析后的字段list
     """
-    # 各字段的list
-    title_list = []
-    price_list = []
-    addr_list = []
-    area_list = []
-    direction_list = []
-    shape_list = []
 
+    content_list = []
     soup = BeautifulSoup(html, "lxml")
     contents = soup.find_all("div", class_="content__list--item--main")
 
     for content in contents:
-        other_list = content.select(".content__list--item--des")[0].get_text().split("/")
-        title_list.append(content.select(".content__list--item--title > a")[0].get_text().strip())
-        price_list.append(content.select(".content__list--item-price > em")[0].get_text())
+        # other_tag：包含地区、大小、朝向、房型的标签
+        other_tag = content.select(".content__list--item--des")[0]
+        # 判断other_tag是否包含a标签，a标签的内容是地区，剔除脏数据
+        if other_tag.find("a"):
+            # other_list：包含地区、大小、朝向、房型的文本内容
+            other_list = [other.strip() for other in other_tag.get_text().split("/")][:4]
+            # 标题
+            title = content.select(".content__list--item--title > a")[0].get_text().strip()
+            # 价格
+            price = content.select(".content__list--item-price > em")[0].get_text()
+            # 组合各字段数据
+            content_list.append([title, *other_list, price])
 
-        # 补长list
-        new_other_list = supplement_list(other_list, 4)
-
-        # 第一个不是地址就为None
-        if "-" not in new_other_list[0]:
-            new_other_list[0] = "None"
-
-        # 添加各字段内容到list
-        addr_list.append(new_other_list[0].strip())
-        area_list.append(new_other_list[1].strip())
-        direction_list.append(new_other_list[2].strip())
-        shape_list.append(new_other_list[3].strip())
-
-    return title_list, addr_list, area_list, direction_list, shape_list, price_list
+    return content_list
 
 
-def write_csv(func):
+def write_csv(file_name="room1.csv"):
     """
-    写入csv的装饰器，装饰主调用函数
-    :param func: 传入的函数
-    :return:
+    写入csv的装饰器，如果想要写入csv直接加到main()即可"
+    :param file_name: 保存的文件，默认为room，csv
+    :return: None
     """
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        print("写入csv")
-        contents = list(func(*args, **kwargs))
-        df = pandas.DataFrame(contents[0])
-        df.to_csv("lianjia.csv", encoding="utf-8-sig")
-        print(df)
-        print("写入完毕")
+    def write_decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            print("写入csv......")
+            contents = list(func(*args, **kwargs))
+            df = pandas.DataFrame(contents, columns=["标题", "地区", "大小", "朝向", "房型", "价格"])
+            df.to_csv(file_name, encoding="utf-8-sig")
+            print(df.head(5))
+            print("写入完毕......")
+        return wrapper
+    return write_decorator
 
-    return wrapper
 
-
-@write_csv
+@write_csv()
 def main():
     """
     主调用函数，整合各个函数内容
-    :return: 生成器
+    :return: content_list,内容数组
     """
-    title_list = []
-    addr_list = []
-    area_list = []
-    direction_list = []
-    shape_list = []
-    price_list = []
-
-    # 获取html list，可自行传入页数
-    html_list = [get_html(url) for url in get_urls(2)]
+    content_list = []
+    # 获取代理
+    proxy = get_proxy()
+    html_list = [get_html(url, proxy) for url in get_urls(92)]
 
     for html in html_list:
         if html:
-            title, addr, area, direction, shape, price = analytic_html(html)
-            title_list.extend(title)
-            addr_list.extend(addr)
-            area_list.extend(area)
-            direction_list.extend(direction)
-            shape_list.extend(shape)
-            price_list.extend(price)
+            content_list.extend(analytic_room_html(html))
 
-    yield {
-        "title": title_list,
-        "addr": addr_list,
-        "area": area_list,
-        "direction": direction_list,
-        "shape": shape_list,
-        "price": price_list,
-    }
+    return content_list
 
 
 if __name__ == '__main__':
     main()
+
